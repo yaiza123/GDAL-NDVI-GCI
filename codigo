@@ -1,0 +1,377 @@
+# -*- coding: utf-8 -*-
+# Import required libraries from python
+import sys, os, struct
+# Import gdal
+import osgeo.gdal as gdal
+try:
+    from osgeo import ogr, gdal
+    from osgeo.gdalconst import *
+    import numpy as np
+    import arcpy
+    from arcpy import env
+    from arcpy.sa import *
+    import matplotlib.pyplot as plt
+    import earthpy as et
+    import arcpy
+except ImportError:
+    import ogr, gdal
+    from gdalconst import *
+    import numpy as np
+    import struct
+    from numpy import greater
+    import arcpy
+
+    from arcpy import env
+    from arcpy.sa import *
+    import os
+    import matplotlib.pyplot as plt
+
+
+#Definimos el directorio y espacio de trabajo
+os.chdir(r'C:/landsat')
+env.workspace = 'C:/landsat'
+##################################################################################################################
+#Trabajaremos con la informacion de dos satelites, Landsat 5 y Landsat 8.
+#Abrimos las bandas de interes de los dos sensores. Como se pretende calcular los i­ndices GCI y NDVI, solo se utilizaran las bandas NIR, Roja y Verde.
+#El formato de las imagenes es .tif y para abrirlas utilizamos gdal.Open
+#el uso de .tif, .gtiff y .tiff es indiferente, ya que se trata del mismo formato pero con diferente resolucion.
+#se evitan las tildes y eñes porque suelen dar problemas
+
+
+#Componemos una imagen multibanda uniendo todas las bandas que se van a utilizar y les damos un nombre sencillo que nos permita utilizarlas en el script
+#En este caso ya empezamos a utilizar funciones de arcpy.
+landsat5 = arcpy.CompositeBands_management("LT05_L1TP_200034_19930719_20180217_01_T1_B3.tif;LT05_L1TP_200034_19930719_20180217_01_T1_B4.tif;LT05_L1TP_200034_19930719_20180217_01_T1_B5.tif", "Landsat5_mb.tif")  
+landsat8 = arcpy.CompositeBands_management("LC08_L1TP_200034_20210716_20210721_01_T1_B2.tif;LC08_L1TP_200034_20210716_20210721_01_T1_B3.tif;LC08_L1TP_200034_20210716_20210721_01_T1_B4.tif", "Landsat8_mb.tif")
+
+#Se recorta la imagen a un area determinada para evitar que pese mucho, y utilizarlo en un area de interes
+#Dentro del parentesis:
+#El primero elemento es la capa a recortar
+#El segundo o # es la extension o coordenadas por las que se desea recortar, pero como se tiene una capa no es necesario indicar nada
+#El tercero es el nombre que le damos para la salida
+#El ultimo es la capa que se utiliza para recortar, al no utilizar las coordenadas se debe de indicar la almohadilla 
+
+arcpy.Clip_management("landsat5_mb.tif","#","landsat5_recortado.tif","coordenadas.shp")
+arcpy.Clip_management("landsat8_mb.tif","#","landsat8_recortado.tif","coordenadas.shp")
+
+
+#Se definen las funciones de salida, una para cada indice y satelite
+def NDVI():
+# Introducimos una condicion que nos permita conocer si se ha abierto el archivo correctamente o no
+    ls8 = gdal.Open('Landsat8_recortado.tif')
+    if ls8 is None:
+        print('No se puede abrir el archivo')
+        sys.exit(1)
+      
+    # Se obtiene el tamano de la imagen y el numero de bandas(en este caso deberian salir 3, ya que se han seleccionado previamente)
+    filas = ls8.RasterYSize
+    columnas = ls8.RasterXSize
+    bandas = ls8.RasterCount
+    print("Filas:", filas, " Columnas:", columnas, " Bandas:", bandas)
+    
+    # Se obtienen los datos del raster
+    Cambio = ls8.GetGeoTransform()#Cambio de coordenadas sin proyectar a un sistema de coordenadas georrefernciado
+    minimoX = Cambio[0] # Coordenadas esquina superior izquierda X
+    maximoY = Cambio[3] # Coordenadas esquina superior izquierda Y
+    anchoPixel = Cambio[1] #Anchura del pixel
+    altoPixel = Cambio[5]# Altura del pixel
+    maximoX = minimoX + (columnas * anchoPixel) #Coordenadas esquina inferior derecha X
+    minimoY = maximoY + (filas * altoPixel) #Coordenadas esquina inferior derecha Y
+    print("Ancho pixel:", anchoPixel, " Alto pixel:", altoPixel, "\n")
+   
+    #Se obtienen las bandas necesarias para el NDVI
+    infrarrojo = ls8.GetRasterBand(3)
+    rojo = ls8.GetRasterBand(2)
+    
+    #Division en bloques para la lectura del archivo
+    blockSizes = infrarrojo.GetBlockSize()
+    TamanoBloqueX = blockSizes[0]
+    TamanoBloqueY = blockSizes[1]
+    
+    #Creacion del archivo de salida de tipo 'GeoTiff'. GDT_CFloat32 es el formato que toman los datos de los distintos pixeles
+    driver = gdal.GetDriverByName('GTiff')
+    outDataset = driver.Create('NDVI_L8.tiff', columnas, filas, 1, GDT_CFloat32)
+    SalidaBanda1 = outDataset.GetRasterBand(1)
+    
+    #Definidos estas dos variables para despues utilizarlas.
+    cont = 0
+    total = 0
+    
+    # A continuacion, se realiza una lectura de los datos a partir de los bloques creados anteriormente.
+    #Para ello hay que iterar sobre las filas...
+    for i in range(0, filas, TamanoBloqueY):
+        if i + TamanoBloqueY < filas:
+            nFilas = TamanoBloqueY
+        else:
+            nFilas = filas - i
+        
+        # ...y despues sobre las columnas
+        for j in range(0, columnas, TamanoBloqueX):
+            if j + TamanoBloqueX < columnas:
+                nColumnas = TamanoBloqueX
+            else:
+                nColumnas = columnas - j
+                
+            # Ahora se utilizan las funciones de 'numpy', para leer los bloques a traves de matrices
+            # No se dieferencia entre las columnas y filas de infrarrojo y rojo, ya que ambas bandas poseen las mismas dimensiones
+            # Con np.single se define el tipo de datos que va a tomar el objeto, en este caso sera un FLOAT 
+            datos2 = rojo.ReadAsArray(j, i, nColumnas, nFilas).astype(np.single)
+            datos3 = infrarrojo.ReadAsArray(j, i, nColumnas, nFilas).astype(np.single)
+            
+            # Creacion de la mascara. En los valores donde existan datos se cambiara el valor por 1 (Solo en la mascara)
+            #De esta manera se eliminan todos los pixeles que no deseamos analizar, asignÃ¡ndoles un valor 0. 
+            #Para ello se utiliza np.greater que devuelve el valor que cumple una condicion y el que no lo cumple lo rechaza
+            mascara = np.greater(datos3 + datos2, 0)
+            
+            # Se calcula el NDVI para cada pixel, aplicando la formula en las distintas matrices.
+            # El np.choose establece que en los valores de la mascara con 0, se establezca el valor -99 para la matriz resultante
+            ndvi = np.choose(mascara, (-99, (datos3-datos2) / (datos3+datos2)))
+            
+            # A pesar de que el indice es entre 0 y 1, ArcGis tiene problemas al visualizar escalas entre 0 y 1(a no ser que se modifique)
+            # por lo tanto al multiplicarlo x100 la imagen resultante se aprecia mucho mejor y es mucho mas valida para el posterior estudio.
+            ndviL8 = ndvi * 100
+            
+            # Se incluye el NDVI en la banda del archivo final, segun la lectura en bloques
+            SalidaBanda1.WriteArray(ndviL8, j, i)
+        
+        
+    # Se anaden las dimensiones y la proyeccion al raster final
+    outDataset.SetGeoTransform(Cambio) 
+    
+    #Establecimiento de la proyeccion, dando a la imagen de salida la misma que la de entrada
+    outDataset.SetProjection(ls8.GetProjection())
+    
+    print('\nScript finalizado')
+    
+#------------------------------------------------------------------------------------------------------
+
+
+#Se crea de nuevo la misma funcion pero en este caso utilizando las imagenes de Landsat 5
+def NDVI2():
+
+    ls5 = gdal.Open('Landsat5_recortado.tif')
+    if ls5 is None:
+        print('No se puede abrir el archivo')
+        sys.exit(1)
+      
+    filas = ls5.RasterYSize
+    columnas = ls5.RasterXSize
+    bandas = ls5.RasterCount
+    print("Filas:", filas, " Columnas:", columnas, " Bandas:", bandas)
+    
+    Cambio = ls5.GetGeoTransform()
+    MinimoX = Cambio[0] 
+    MaximoY = Cambio[3] 
+    anchoPixel = Cambio[1]
+    altoPixel = Cambio[5]
+    MaximoX = MinimoX + (columnas * anchoPixel) 
+    MinimoY = MaximoY + (filas * altoPixel) 
+    print("Ancho pixel:", anchoPixel, " Alto pixel:", altoPixel, "\n")
+
+
+    infrarrojo = ls5.GetRasterBand(3)
+    rojo = ls5.GetRasterBand(2)
+    
+    blockSizes = infrarrojo.GetBlockSize()
+    TamanoBloqueX = blockSizes[0]
+    TamanoBloqueY = blockSizes[1]
+   
+    driver = gdal.GetDriverByName('GTiff')
+    outDataset2 = driver.Create('NDVI_L5.tiff', columnas, filas, 1, GDT_CFloat32)
+    SalidaBanda2 = outDataset2.GetRasterBand(1)
+    
+    cont = 0
+    total = 0
+    
+    for i in range(0, filas, TamanoBloqueY):
+        if i + TamanoBloqueY < filas:
+            nFilas = TamanoBloqueY
+        else:
+            nFilas = filas - i
+        
+        
+        for j in range(0, columnas, TamanoBloqueX):
+            if j + TamanoBloqueX < columnas:
+                nColumnas = TamanoBloqueX
+            else:
+                nColumnas = columnas - j
+                
+            datos2 = rojo.ReadAsArray(j, i, nColumnas, nFilas).astype(np.single)
+            datos3 = infrarrojo.ReadAsArray(j, i, nColumnas, nFilas).astype(np.single)
+            
+            mascara = np.greater(datos3 + datos2, 0)
+   
+            ndvi = np.choose(mascara, (-99, (datos3-datos2) / (datos3+datos2)))
+            
+            ndviL5 = ndvi * 100
+      
+            SalidaBanda2.WriteArray(ndviL5, j, i)
+    
+    outDataset2.SetGeoTransform(Cambio) 
+    
+    outDataset2.SetProjection(ls5.GetProjection())
+    
+    print('\nScript finalizado')
+
+
+# Una vez se han calculado los del NDVI se procede a realizar el mismo proceso, en este caso aplicando el indice GCI
+
+def GCI():
+    ls8 = gdal.Open('Landsat8_recortado.tif')
+    if ls8 is None:
+        print('No se puede abrir el archivo')
+        sys.exit(1)
+ 
+    filas = ls8.RasterYSize
+    columnas = ls8.RasterXSize
+    bandas = ls8.RasterCount
+    print("Filas:", filas, " Columnas:", columnas, " Bandas:", bandas)
+    
+    
+    Cambio = ls8.GetGeoTransform()
+    MinimoX = Cambio[0] 
+    MaximoY = Cambio[3] 
+    anchoPixel = Cambio[1]
+    altoPixel = Cambio[5]
+    MaximoX = MinimoX + (columnas * anchoPixel) 
+    MinimoY = MaximoY + (filas * altoPixel) 
+    print("Ancho pixel:", anchoPixel, " Alto pixel:", altoPixel, "\n")
+
+    infrarrojo = ls8.GetRasterBand(3)
+    verde = ls8.GetRasterBand(1)
+    
+    blockSizes = infrarrojo.GetBlockSize()
+    TamanoBloqueX = blockSizes[0]
+    TamanoBloqueY = blockSizes[1]
+    
+    driver = gdal.GetDriverByName('GTiff')
+    outDataset3 = driver.Create('GCI_L8.tiff', columnas, filas, 1, GDT_CFloat32) 
+    SalidaBanda3 = outDataset3.GetRasterBand(1)
+    
+    cont = 0
+    total = 0
+    
+    for i in range(0, filas, TamanoBloqueY):
+        if i + TamanoBloqueY < filas:
+            nFilas = TamanoBloqueY
+        else:
+            nFilas = filas - i
+        
+        
+        for j in range(0, columnas, TamanoBloqueX):
+            if j + TamanoBloqueX < columnas:
+                nColumnas = TamanoBloqueX
+            else:
+                nColumnas = columnas - j
+            
+            #En este caso en vez de utilizar el rojo y el infrarrojo, utilizamos el verde y el infrarrojo
+            datos1 = verde.ReadAsArray(j, i, nColumnas, nFilas).astype(np.single)
+            datos3 = infrarrojo.ReadAsArray(j, i, nColumnas, nFilas).astype(np.single)
+            
+          
+            mascara = np.greater(datos3 + datos1, 0)
+            
+            # Se aplica la formula del GCI
+            gci = np.choose(mascara, (-99, ((datos3) / (datos1))-1))
+            
+            gcils8 = gci * 100
+            
+            SalidaBanda3.WriteArray(gcils8, j, i)
+        
+        
+    outDataset3.SetGeoTransform(Cambio)
+    
+    
+    outDataset3.SetProjection(ls8.GetProjection())
+
+def GCI2():
+    ls5 = gdal.Open('Landsat5_recortado.tif')
+    if ls5 is None:
+        print('No se puede abrir el archivo')
+        sys.exit(1)
+      
+    
+    filas = ls5.RasterYSize
+    columnas = ls5.RasterXSize
+    bandas = ls5.RasterCount
+    print("Filas:", filas, " Columnas:", columnas, " Bandas:", bandas)
+    
+    
+    Cambio = ls5.GetGeoTransform()
+    MinimoX = Cambio[0] 
+    MaximoY = Cambio[3] 
+    anchoPixel = Cambio[1]
+    altoPixel = Cambio[5]
+    MaximoX = MinimoX + (columnas * anchoPixel) 
+    MinimoY = MaximoY + (filas * altoPixel) 
+    print("Ancho pixel:", anchoPixel, " Alto pixel:", altoPixel, "\n")
+    
+    infrarrojo = ls5.GetRasterBand(3)
+    verde = ls5.GetRasterBand(1)
+    
+    blockSizes = infrarrojo.GetBlockSize()
+    TamanoBloqueX = blockSizes[0]
+    TamanoBloqueY = blockSizes[1]
+    
+    driver = gdal.GetDriverByName('GTiff')
+    outDataset4 = driver.Create('GCI_L5.tiff', columnas, filas, 1, GDT_CFloat32) 
+    SalidaBanda4 = outDataset4.GetRasterBand(1)
+    
+    cont = 0
+    total = 0
+    
+    for i in range(0, filas, TamanoBloqueY):
+        if i + TamanoBloqueY < filas:
+            nFilas = TamanoBloqueY
+        else:
+            nFilas = filas - i
+        
+        
+        for j in range(0, columnas, TamanoBloqueX):
+            if j + TamanoBloqueX < columnas:
+                nColumnas = TamanoBloqueX
+            else:
+                nColumnas = columnas - j
+                
+            datos1 = verde.ReadAsArray(j, i, nColumnas, nFilas).astype(np.single)
+            datos3 = infrarrojo.ReadAsArray(j, i, nColumnas, nFilas).astype(np.single)
+            
+            mascara = np.greater(datos3 + datos1, 0)
+            
+
+            gci = np.choose(mascara, (-99, ((datos3) / (datos1))-1))
+            
+            gcils5 = gci * 100
+            
+            SalidaBanda4.WriteArray(gcils5, j, i)
+        
+        
+
+    outDataset4.SetGeoTransform(Cambio) # o geotransform anterior
+    
+
+    outDataset4.SetProjection(ls5.GetProjection())
+
+
+
+#se define la funcion de la resta, permite calcular la imagen con las areas de cambio
+#no se ha conseguido terminar, pero esta es la idea
+def resta():
+    outRas = ("C:/landsat/RESTA.tif")
+    outRas = (arcpy.Raster("NDVI_L8.tiff") - arcpy.Raster("NVDI_L5.tiff"))
+
+def resta2():
+    outRas = ("C:/landsat/RESTA2.tif")
+    outRas = (arcpy.Raster("GCI_L8.tiff") - arcpy.Raster("GCI_L5.tiff"))
+
+
+
+
+consulta = input ('Escoja el indice con el que quiere trabajar, 1. NDVI. 2. GCI:   ')
+if (consulta) == 1:
+    NDVI()
+    NDVI2()
+    print('El programa ha terminado')
+else:
+        GCI()
+        GCI2()
+        print('El programa ha terminado')
